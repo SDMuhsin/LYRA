@@ -16,7 +16,6 @@ scikit-learn
 scipy
 accelerate
 safetensors
-pyarrow
 tokenizers
 requests
 PyYAML
