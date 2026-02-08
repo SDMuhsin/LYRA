@@ -439,6 +439,8 @@ $account_line
             echo '========================================'
             nvidia-smi
             export PYTHONPATH=\"\$PYTHONPATH:\$(pwd)/src\"
+            python -c "import sys; print('\n'.join(sys.path))"
+            python -c "import pandas; print(pandas.__file__)" 2>&1 || echo "pandas NOT FOUND"
             $python_cmd
             echo '========================================'
             echo 'Finished: '\$(date)
