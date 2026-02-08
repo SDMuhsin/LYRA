@@ -78,14 +78,14 @@ techniques=(
 
 # GLUE tasks to evaluate
 tasks=(
-    #"mrpc"
-    "sst2"
-    #"cola"
-    #"rte"
-    #"qnli"
-    #"stsb"
-    #"mnli"   # 393K train - very expensive, uncomment if needed
-    # "qqp"    # 364K train - very expensive, uncomment if needed
+    "mrpc"
+    #"sst2"
+    "cola"
+    "rte"
+    "qnli"
+    "stsb"
+    "mnli"   # 393K train - very expensive, uncomment if needed
+     "qqp"    # 364K train - very expensive, uncomment if needed
 )
 
 # ============================================================================
