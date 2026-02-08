@@ -1,0 +1,5 @@
+env
+llmdocs
+data/
+results
+**/**.pyc
