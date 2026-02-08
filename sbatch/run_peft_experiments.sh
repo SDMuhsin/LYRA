@@ -62,11 +62,11 @@ models=(
 # All PEFT methods tuned to ~20K params where structurally possible.
 # LoRA/DoRA included at structural minimum (r=1) for completeness.
 techniques=(
-    "base"
-    "lora"
-    "dora"
-    "vera"
-    "fourierft"
+    #"base"
+    #"lora"
+    #"dora"
+    #"vera"
+    #"fourierft"
     "spectral_p16"
     # --- Higher-budget variants (uncomment for extended comparison) ---
     # "lora_r8"        # LoRA r=8 standard config (~295K params)
