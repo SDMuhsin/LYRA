@@ -416,8 +416,7 @@ for model in "${models[@]}"; do
 #SBATCH --cpus-per-task=4
 $account_line
 
-            module load scipy-stack cuda cudnn
-            module load arrow
+            module load gcc arrow scipy-stack cuda cudnn
             source ./env/bin/activate
 
             export HF_HOME=\$(pwd)/data
