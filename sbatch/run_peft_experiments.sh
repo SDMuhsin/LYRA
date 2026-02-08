@@ -62,12 +62,12 @@ models=(
 # All PEFT methods tuned to ~20K params where structurally possible.
 # LoRA/DoRA included at structural minimum (r=1) for completeness.
 techniques=(
-    #"base"
+    "base"
     #"lora"
     #"dora"
     #"vera"
     #"fourierft"
-    "spectral_p16"
+    #"spectral_p16"
     # --- Higher-budget variants (uncomment for extended comparison) ---
     # "lora_r8"        # LoRA r=8 standard config (~295K params)
     # "dora_r16"       # DoRA r=16 standard config (~600K+ params)
@@ -80,10 +80,10 @@ techniques=(
 tasks=(
     "mrpc"
     #"sst2"
-    "cola"
-    "rte"
+    #"cola"
+    #"rte"
     #"qnli"
-    "stsb"
+    #"stsb"
     #"mnli"   # 393K train - very expensive, uncomment if needed
     # "qqp"    # 364K train - very expensive, uncomment if needed
 )
