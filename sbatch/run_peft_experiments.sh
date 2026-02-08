@@ -63,11 +63,11 @@ models=(
 # LoRA/DoRA included at structural minimum (r=1) for completeness.
 techniques=(
     "base"
-    #"lora"
-    #"dora"
-    #"vera"
-    #"fourierft"
-    #"spectral_p16"
+    "lora"
+    "dora"
+    "vera"
+    "fourierft"
+    "spectral_p16"
     # --- Higher-budget variants (uncomment for extended comparison) ---
     # "lora_r8"        # LoRA r=8 standard config (~295K params)
     # "dora_r16"       # DoRA r=16 standard config (~600K+ params)
@@ -78,8 +78,8 @@ techniques=(
 
 # GLUE tasks to evaluate
 tasks=(
-    "mrpc"
-    #"sst2"
+    #"mrpc"
+    "sst2"
     #"cola"
     #"rte"
     #"qnli"
