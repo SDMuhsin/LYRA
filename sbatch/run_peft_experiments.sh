@@ -3,8 +3,8 @@
 # PEFT Comprehensive Benchmark Suite - SLURM Submission Script
 # ============================================================================
 #
-# Submits Mo5 (median-of-5-seeds) benchmarks for PEFT methods on GLUE tasks.
-# Each job runs train_glue.py which internally loops seeds 41-45 and writes
+# Submits single-seed benchmarks for PEFT methods on GLUE tasks.
+# Each job runs train_glue.py which uses seed=42 and writes
 # results to ./results/mo53_glue.csv with file locking for concurrent safety.
 #
 # PARAMETER BUDGET: ~20K trainable params (matching Spectral p=16 best result)
@@ -13,13 +13,15 @@
 #   - base:         Full fine-tuning (~110M)        Performance ceiling
 #   - lora:         LoRA r=1 (~38K)                 Structural minimum; cannot reach 20K
 #   - dora:         DoRA r=1 (~253K)                Structural minimum; cannot reach 20K
+#   - adalora:      AdaLoRA init_r=1 (~169K)        Structural minimum; cannot reach 20K
+#   - dylora:       DyLoRA r=1 (~169K)              Structural minimum; cannot reach 20K
 #   - vera:         VeRA r=128 (~20K)               Parameter-matched
 #   - fourierft:    FourierFT n=252 (~20K)          Parameter-matched
 #   - spectral_p16: Spectral Adapter p=q=16 (~20K)  Ours (best result)
 #
-# LoRA/DoRA cannot reach the 20K budget even at r=1 due to their per-module
-# parameter structure. They are included at their structural minimum (r=1)
-# to demonstrate that Spectral achieves better performance with fewer params.
+# LoRA/DoRA/AdaLoRA/DyLoRA cannot reach the 20K budget even at r=1 due to their
+# per-module parameter structure. They are included at their structural minimum
+# (r=1) to demonstrate that Spectral achieves better performance with fewer params.
 #
 # Usage:
 #   ./sbatch/run_peft_experiments.sh
@@ -64,8 +66,10 @@ models=(
 techniques=(
     "base"
     "lora"
-    "dora"
-    "vera"
+    #"dora"
+    "adalora"
+    "dylora"
+    #"vera"
     "fourierft"
     "spectral_p16"
     # --- Higher-budget variants (uncomment for extended comparison) ---
@@ -79,7 +83,7 @@ techniques=(
 # GLUE tasks to evaluate
 tasks=(
     "mrpc"
-    #"sst2"
+    "sst2"
     "cola"
     "rte"
     "qnli"
@@ -162,6 +166,24 @@ FOURIERFT_SCALING=300.0
 SPECTRAL_LR="2e-3"
 SPECTRAL_SCALING=1.0
 SPECTRAL_DROPOUT=0.0
+SPECTRAL_D_INITIAL=0.01  # Nonzero init fixes CoLA underperformance (late adapter onset)
+
+# --- AdaLoRA (Zhang et al., 2023) via PEFT ---
+#     SVD-parameterized LoRA with adaptive rank allocation.
+#     At init_r=1: 73 modules x (in*1 + out*1 + 1) = ~169K
+#     Cannot reach 20K. Included at structural minimum (r=1).
+ADALORA_LR="2e-3"
+ADALORA_INIT_R=1
+ADALORA_TARGET_R=1
+ADALORA_ALPHA=2
+
+# --- DyLoRA (Valipour et al., EACL 2023) custom ---
+#     Trains across randomly sampled ranks. At r=1, = standard LoRA.
+#     73 modules x (in + out) x 1 = ~169K
+#     Cannot reach 20K. Included at structural minimum (r=1).
+DYLORA_LR="2e-4"
+DYLORA_R=1
+DYLORA_ALPHA=2
 
 # --- Higher-budget variant hyperparameters (for extended comparison) ---
 LORA_R8_LR="2e-4"
@@ -244,11 +266,7 @@ get_epochs() {
 
 get_time_limit() {
     # Returns SLURM time string based on technique, task, and model
-    # Estimates derived from actual BERT-base timings:
-    #   FourierFT MRPC Mo5 (30ep): 3405s ~57min
-    #   Spectral  MRPC Mo5 (30ep): 1785s ~30min
-    #   FourierFT SST2 Mo5 (10ep): 42715s ~12h
-    #   Spectral  SST2 Mo5 (10ep): 21309s ~6h
+    # Estimates derived from actual BERT-base timings (single seed, ~1/5 of Mo5):
     # Time limits include ~2x safety margin.
     local technique=$1
     local task=$2
@@ -256,23 +274,23 @@ get_time_limit() {
     local minutes=0
 
     if [[ "$technique" == "base" ]]; then
-        # Full FT: 3 epochs, all params update but very few epochs
+        # Full FT: 3 epochs, single seed
         case $task in
-            mrpc|rte|stsb|wnli)  minutes=30   ;;
-            cola)                 minutes=45   ;;
-            sst2)                 minutes=120  ;;
-            qnli)                 minutes=240  ;;
-            qqp|mnli)             minutes=480  ;;
+            mrpc|rte|stsb|wnli)  minutes=10   ;;
+            cola)                 minutes=15   ;;
+            sst2)                 minutes=30   ;;
+            qnli)                 minutes=55   ;;
+            qqp|mnli)             minutes=120  ;;
         esac
     else
-        # PEFT: frozen backbone, more epochs
+        # PEFT: frozen backbone, more epochs, single seed
         case $task in
-            rte|wnli)   minutes=120  ;;   # 2h    (tiny dataset, 30ep)
-            mrpc|stsb)  minutes=150  ;;   # 2.5h  (small dataset, 30ep)
-            cola)       minutes=240  ;;   # 4h    (medium dataset, 30ep)
-            sst2)       minutes=1080 ;;   # 18h   (large dataset, 10ep)
-            qnli)       minutes=1680 ;;   # 28h   (xlarge dataset, 10ep)
-            qqp|mnli)   minutes=2880 ;;   # 48h   (xxlarge dataset, 10ep)
+            rte|wnli)   minutes=30   ;;   # 30min  (tiny dataset, 30ep)
+            mrpc|stsb)  minutes=35   ;;   # 35min  (small dataset, 30ep)
+            cola)       minutes=55   ;;   # 55min  (medium dataset, 30ep)
+            sst2)       minutes=240  ;;   # 4h     (large dataset, 10ep)
+            qnli)       minutes=360  ;;   # 6h     (xlarge dataset, 10ep)
+            qqp|mnli)   minutes=600  ;;   # 10h    (xxlarge dataset, 10ep)
         esac
     fi
 
@@ -329,8 +347,14 @@ build_python_cmd() {
         fourierft)
             echo "$common --optimizer adamw-fourierft --learning_rate $FOURIERFT_LR --fourierft_n_frequency $FOURIERFT_N --fourierft_scaling $FOURIERFT_SCALING"
             ;;
+        adalora)
+            echo "$common --optimizer adamw-adalora --learning_rate $ADALORA_LR --adalora_init_r $ADALORA_INIT_R --adalora_target_r $ADALORA_TARGET_R --adalora_alpha $ADALORA_ALPHA"
+            ;;
+        dylora)
+            echo "$common --optimizer adamw-dylora --learning_rate $DYLORA_LR --dylora_r $DYLORA_R --dylora_alpha $DYLORA_ALPHA"
+            ;;
         spectral_p16)
-            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_p 16 --spectral_q 16 --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT"
+            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_p 16 --spectral_q 16 --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL"
             ;;
         # --- Higher-budget variants ---
         lora_r8)
@@ -346,7 +370,7 @@ build_python_cmd() {
             echo "$common --optimizer adamw-fourierft --learning_rate $FOURIERFT_N1K_LR --fourierft_n_frequency $FOURIERFT_N1K_N --fourierft_scaling $FOURIERFT_N1K_SCALING"
             ;;
         spectral_p32)
-            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_P32_LR --spectral_p 32 --spectral_q 32 --spectral_scaling $SPECTRAL_P32_SCALING --spectral_dropout $SPECTRAL_P32_DROPOUT"
+            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_P32_LR --spectral_p 32 --spectral_q 32 --spectral_scaling $SPECTRAL_P32_SCALING --spectral_dropout $SPECTRAL_P32_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL"
             ;;
     esac
 }
@@ -357,6 +381,8 @@ get_technique_desc() {
         base)           echo "Full FT (lr=$BASE_LR, ${BASE_EPOCHS}ep, ~110M params)" ;;
         lora)           echo "LoRA (r=$LORA_R, a=$LORA_ALPHA, lr=$LORA_LR, ~38K params)" ;;
         dora)           echo "DoRA (r=$DORA_R, a=$DORA_ALPHA, lr=$DORA_LR, ~253K params)" ;;
+        adalora)        echo "AdaLoRA (init_r=$ADALORA_INIT_R, target_r=$ADALORA_TARGET_R, lr=$ADALORA_LR, ~169K params)" ;;
+        dylora)         echo "DyLoRA (r=$DYLORA_R, a=$DYLORA_ALPHA, lr=$DYLORA_LR, ~169K params)" ;;
         vera)           echo "VeRA (r=$VERA_R, lr=$VERA_LR, ~20K params)" ;;
         fourierft)      echo "FourierFT (n=$FOURIERFT_N, s=$FOURIERFT_SCALING, lr=$FOURIERFT_LR, ~20K params)" ;;
         spectral_p16)   echo "Spectral (p=16, q=16, lr=$SPECTRAL_LR, ~20K params)" ;;

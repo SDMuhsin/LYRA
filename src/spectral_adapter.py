@@ -54,7 +54,8 @@ class SpectralAdapterLinear(nn.Module):
     """
 
     def __init__(self, base_layer: nn.Linear, p: int, q: int,
-                 scaling: float = 1.0, dropout: float = 0.0):
+                 scaling: float = 1.0, dropout: float = 0.0,
+                 d_initial: float = 0.0):
         super().__init__()
         self.base_layer = base_layer
         self.out_features = base_layer.out_features  # m
@@ -75,8 +76,12 @@ class SpectralAdapterLinear(nn.Module):
         self.register_buffer('dct_out', _dct_basis(self.out_features, p, dtype))
 
         # Trainable coefficient matrix: S ∈ R^{p × q}
-        # Initialized to zeros so ΔW = 0 at start (identity adapter)
         self.coeffs = nn.Parameter(torch.zeros(p, q, dtype=dtype))
+        if d_initial > 0.0:
+            # Nonzero init: small random perturbation so the adapter
+            # contributes from the first forward pass (similar to VeRA's d_initial).
+            nn.init.normal_(self.coeffs, mean=0, std=d_initial)
+        # else: zeros → ΔW = 0 at start (identity adapter)
 
         # Optional dropout
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
@@ -120,7 +125,7 @@ class SpectralAdapterModel(nn.Module):
 
     def __init__(self, model: nn.Module, target_modules: List[str],
                  p: int = 32, q: int = 32, scaling: float = 1.0,
-                 dropout: float = 0.0):
+                 dropout: float = 0.0, d_initial: float = 0.0):
         super().__init__()
         self.model = model
         self.target_modules = target_modules
@@ -134,14 +139,14 @@ class SpectralAdapterModel(nn.Module):
             param.requires_grad = False
 
         # Apply adapters (this creates trainable coeffs)
-        self._apply_adapters(target_modules, p, q, scaling, dropout)
+        self._apply_adapters(target_modules, p, q, scaling, dropout, d_initial)
 
         # Unfreeze classifier head (newly initialized, needs training)
         for name, param in model.named_parameters():
             if 'classifier' in name:
                 param.requires_grad = True
 
-    def _apply_adapters(self, target_modules, p, q, scaling, dropout):
+    def _apply_adapters(self, target_modules, p, q, scaling, dropout, d_initial):
         """Replace target linear layers with SpectralAdapterLinear."""
         for name, module in list(self.model.named_modules()):
             if not isinstance(module, nn.Linear):
@@ -165,7 +170,8 @@ class SpectralAdapterModel(nn.Module):
             # Replace with adapted version
             adapted = SpectralAdapterLinear(
                 module, p=layer_p, q=layer_q,
-                scaling=scaling, dropout=dropout
+                scaling=scaling, dropout=dropout,
+                d_initial=d_initial
             )
             setattr(parent, attr_name, adapted)
             self.adapted_modules.append(name)
@@ -194,7 +200,8 @@ def get_spectral_adapter_model(model: nn.Module,
                                 target_modules: List[str],
                                 p: int = 32, q: int = 32,
                                 scaling: float = 1.0,
-                                dropout: float = 0.0) -> SpectralAdapterModel:
+                                dropout: float = 0.0,
+                                d_initial: float = 0.0) -> SpectralAdapterModel:
     """
     Apply Truncated DCT Factored Adaptation to a model.
 
@@ -205,8 +212,11 @@ def get_spectral_adapter_model(model: nn.Module,
         q: Number of DCT basis vectors for input dimension
         scaling: Scaling factor for the adapter output
         dropout: Dropout probability for adapter
+        d_initial: If > 0, initialize coefficients with N(0, d_initial) instead of zeros.
+                   Nonzero initialization allows the adapter to contribute from the first
+                   step, preventing representation drift disruption on small tasks.
 
     Returns:
         SpectralAdapterModel wrapping the adapted model
     """
-    return SpectralAdapterModel(model, target_modules, p, q, scaling, dropout)
+    return SpectralAdapterModel(model, target_modules, p, q, scaling, dropout, d_initial)

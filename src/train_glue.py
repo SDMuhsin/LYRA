@@ -86,11 +86,12 @@ import adapters
 from adapters import LoRAConfig, IA3Config, PrefixTuningConfig
 from filelock import FileLock
 
-# Import PEFT library for DoRA, VeRA, and FourierFT
+# Import PEFT library for DoRA, VeRA, FourierFT, and AdaLoRA
 from peft import (
     LoraConfig as PeftLoraConfig,
     VeraConfig,
     FourierFTConfig,
+    AdaLoraConfig,
     get_peft_model,
     TaskType
 )
@@ -101,6 +102,9 @@ from gbvera import get_gbvera_model, GBVeraModel
 # Import Spectral Adapter (Truncated DCT Factored Adaptation)
 from spectral_adapter import get_spectral_adapter_model, SpectralAdapterModel
 
+# Import DyLoRA (Dynamic Low-Rank Adaptation)
+from dylora import get_dylora_model, DyLoRAModel
+
 
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -110,7 +114,7 @@ os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
 ###############################################################################
 #                                   constants                                 #
 ###############################################################################
-SEEDS: List[int] = [41, 42, 43, 44, 45]
+SEEDS: List[int] = [42]
 RESULTS_DIR = "./results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 RESULTS_FILE = os.path.join(RESULTS_DIR, "mo53_glue.csv")
@@ -235,11 +239,27 @@ def parse_args():
     parser.add_argument("--gbvera_dropout", type=float, default=0.0, help="GB-VeRA dropout probability.")
     parser.add_argument("--gbvera_projection_prng_key", type=int, default=0, help="GB-VeRA random seed for projection initialization.")
 
+    # AdaLoRA Specific Arguments
+    parser.add_argument("--adalora_init_r", type=int, default=12, help="AdaLoRA initial rank (before pruning).")
+    parser.add_argument("--adalora_target_r", type=int, default=4, help="AdaLoRA target rank (after pruning).")
+    parser.add_argument("--adalora_alpha", type=int, default=8, help="AdaLoRA alpha scaling parameter.")
+    parser.add_argument("--adalora_dropout", type=float, default=0.0, help="AdaLoRA dropout probability.")
+    parser.add_argument("--adalora_tinit", type=int, default=200, help="AdaLoRA: initial warmup steps (no pruning). Paper default=200.")
+    parser.add_argument("--adalora_tfinal", type=int, default=200, help="AdaLoRA: final steps (no pruning). Paper default=200.")
+    parser.add_argument("--adalora_deltaT", type=int, default=10, help="AdaLoRA: interval between rank allocation steps. Paper default=10.")
+    parser.add_argument("--adalora_orth_reg_weight", type=float, default=0.5, help="AdaLoRA: orthogonality regularization weight.")
+
+    # DyLoRA Specific Arguments
+    parser.add_argument("--dylora_r", type=int, default=8, help="DyLoRA max rank (trains across ranks 1..r).")
+    parser.add_argument("--dylora_alpha", type=int, default=16, help="DyLoRA alpha scaling parameter.")
+    parser.add_argument("--dylora_dropout", type=float, default=0.0, help="DyLoRA dropout probability.")
+
     # Spectral Adapter (Truncated DCT Factored Adaptation) Arguments
     parser.add_argument("--spectral_p", type=int, default=32, help="Spectral adapter: number of DCT basis vectors for output dimension.")
     parser.add_argument("--spectral_q", type=int, default=32, help="Spectral adapter: number of DCT basis vectors for input dimension.")
     parser.add_argument("--spectral_scaling", type=float, default=1.0, help="Spectral adapter: scaling factor for adapter output.")
     parser.add_argument("--spectral_dropout", type=float, default=0.0, help="Spectral adapter: dropout probability.")
+    parser.add_argument("--spectral_d_initial", type=float, default=0.0, help="Spectral adapter: if > 0, initialize coefficients with N(0, d_initial) instead of zeros.")
     parser.add_argument("--spectral_target_modules", type=str, default=None, help="Spectral adapter: comma-separated list of target module names (e.g., 'query,value'). If None, uses architecture defaults.")
 
     # Execution & Benchmarking Arguments
@@ -274,7 +294,7 @@ def parse_args():
     # AdapterHub methods: lora, ia3, prefix
     # PEFT methods: dora, vera, fourierft
     # Custom methods: gbvera (gradient-balanced VeRA)
-    adapter_methods = ['lora', 'ia3', 'prefix', 'dora', 'vera', 'fourierft', 'gbvera', 'spectral']
+    adapter_methods = ['lora', 'ia3', 'prefix', 'dora', 'vera', 'fourierft', 'gbvera', 'spectral', 'adalora', 'dylora']
     for method in adapter_methods:
         suffix = f'-{method}'
         if args.optimizer.lower().endswith(suffix):
@@ -428,7 +448,17 @@ def calculate_theoretical_memory(model: nn.Module, args: argparse.Namespace) -> 
                 optimizer_state_params = optimizer_state_multiplier * trainable_params
             else:  # is_adam or is_lion
                 optimizer_state_params = optimizer_state_multiplier * trainable_params
-            
+
+        elif args.adapter_method == 'adalora':
+            # AdaLoRA: SVD-parameterized LoRA with adaptive rank allocation
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            optimizer_state_params = optimizer_state_multiplier * trainable_params
+
+        elif args.adapter_method == 'dylora':
+            # DyLoRA: Dynamic LoRA (same param count as LoRA at max rank)
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            optimizer_state_params = optimizer_state_multiplier * trainable_params
+
         elif args.adapter_method == 'ia3':
             # IA³: Only scaling vectors are trainable, optimizer states for scaling vectors only
             ia3_optimizer_params = 0
@@ -615,8 +645,8 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
     if args.adapter_method:
         # PEFT methods: dora, vera, fourierft
         # Custom methods: gbvera, spectral
-        peft_methods = ['dora', 'vera', 'fourierft']
-        custom_methods = ['gbvera', 'spectral']
+        peft_methods = ['dora', 'vera', 'fourierft', 'adalora']
+        custom_methods = ['gbvera', 'spectral', 'dylora']
 
         if args.adapter_method == 'spectral':
             # Use our Truncated DCT Factored Adaptation
@@ -642,9 +672,35 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
                 q=args.spectral_q,
                 scaling=args.spectral_scaling,
                 dropout=args.spectral_dropout,
+                d_initial=args.spectral_d_initial,
             )
 
             logger.info(f"Successfully applied Spectral Adapter to model.")
+            model.print_trainable_parameters()
+
+        elif args.adapter_method == 'dylora':
+            # Use our custom DyLoRA implementation
+            logger.info(f"Initializing model for DyLoRA training (custom implementation)...")
+
+            # Determine target modules based on model architecture
+            if "roberta" in args.model_name_or_path.lower() or "bert" in args.model_name_or_path.lower():
+                target_modules = ["query", "key", "value", "dense"]
+            elif "gpt2" in args.model_name_or_path.lower() or "gpt-2" in args.model_name_or_path.lower():
+                target_modules = ["c_attn", "c_proj"]
+            elif "llama" in args.model_name_or_path.lower():
+                target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            else:
+                target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+            model = get_dylora_model(
+                model=model,
+                target_modules=target_modules,
+                r=args.dylora_r,
+                alpha=args.dylora_alpha,
+                dropout=args.dylora_dropout,
+            )
+
+            logger.info(f"Successfully applied DyLoRA to model.")
             model.print_trainable_parameters()
 
         elif args.adapter_method == 'gbvera':
@@ -720,6 +776,27 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
                     task_type=TaskType.SEQ_CLS,
                     scaling=args.fourierft_scaling,
                     random_loc_seed=args.fourierft_random_loc_seed
+                )
+            elif args.adapter_method == 'adalora':
+                # Pre-compute total training steps for AdaLoRA's rank allocation schedule
+                n_train = len(raw_datasets["train"])
+                est_steps_per_epoch = math.ceil(n_train / args.per_device_train_batch_size / args.gradient_accumulation_steps)
+                est_total_steps = args.max_train_steps if args.max_train_steps else est_steps_per_epoch * args.num_train_epochs
+                logger.info(f"AdaLoRA: estimated total_step={est_total_steps} for rank allocation schedule")
+
+                peft_config = AdaLoraConfig(
+                    init_r=args.adalora_init_r,
+                    target_r=args.adalora_target_r,
+                    lora_alpha=args.adalora_alpha,
+                    target_modules=target_modules,
+                    lora_dropout=args.adalora_dropout,
+                    bias="none",
+                    task_type=TaskType.SEQ_CLS,
+                    total_step=est_total_steps,
+                    tinit=args.adalora_tinit,
+                    tfinal=args.adalora_tfinal,
+                    deltaT=args.adalora_deltaT,
+                    orth_reg_weight=args.adalora_orth_reg_weight,
                 )
 
             if peft_config:
@@ -903,6 +980,12 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
                 step_times.append(time.perf_counter() - step_start_time)
 
                 lr_scheduler.step()
+
+                # AdaLoRA: update rank allocation BEFORE zero_grad (needs gradients)
+                # Only run when actual pruning is configured (init_r > target_r)
+                if args.adapter_method == 'adalora' and args.adalora_init_r > args.adalora_target_r:
+                    model.base_model.update_and_allocate(completed_steps + 1)
+
                 optimizer.zero_grad()
                 progress_bar.update(1)
                 completed_steps += 1
@@ -1007,7 +1090,9 @@ def main():
         "vera_r", "vera_dropout", "vera_d_initial",
         "gbvera_r", "gbvera_d_initial", "gbvera_b_initial", "gbvera_dropout",
         "fourierft_n_frequency", "fourierft_scaling",
-        "spectral_p", "spectral_q", "spectral_scaling", "spectral_dropout",
+        "adalora_init_r", "adalora_target_r", "adalora_alpha", "adalora_dropout",
+        "dylora_r", "dylora_alpha", "dylora_dropout",
+        "spectral_p", "spectral_q", "spectral_scaling", "spectral_dropout", "spectral_d_initial",
         "per_layer_opt", "gradient_checkpointing", "accuracy", "f1", "matthews_correlation", "pearson", "spearmanr",
         "total_training_time_sec", "param_mem_mib", "opt_mem_mib", "runtime_mem_mib",
         "peak_mem_mib", "theoretical_mem_mib", "avg_step_time", "std_step_time", "seed"
@@ -1048,10 +1133,18 @@ def main():
         "gbvera_dropout": args.gbvera_dropout if args.adapter_method == 'gbvera' else 'N/A',
         "fourierft_n_frequency": args.fourierft_n_frequency if args.adapter_method == 'fourierft' else 'N/A',
         "fourierft_scaling": args.fourierft_scaling if args.adapter_method == 'fourierft' else 'N/A',
+        "adalora_init_r": args.adalora_init_r if args.adapter_method == 'adalora' else 'N/A',
+        "adalora_target_r": args.adalora_target_r if args.adapter_method == 'adalora' else 'N/A',
+        "adalora_alpha": args.adalora_alpha if args.adapter_method == 'adalora' else 'N/A',
+        "adalora_dropout": args.adalora_dropout if args.adapter_method == 'adalora' else 'N/A',
+        "dylora_r": args.dylora_r if args.adapter_method == 'dylora' else 'N/A',
+        "dylora_alpha": args.dylora_alpha if args.adapter_method == 'dylora' else 'N/A',
+        "dylora_dropout": args.dylora_dropout if args.adapter_method == 'dylora' else 'N/A',
         "spectral_p": args.spectral_p if args.adapter_method == 'spectral' else 'N/A',
         "spectral_q": args.spectral_q if args.adapter_method == 'spectral' else 'N/A',
         "spectral_scaling": args.spectral_scaling if args.adapter_method == 'spectral' else 'N/A',
         "spectral_dropout": args.spectral_dropout if args.adapter_method == 'spectral' else 'N/A',
+        "spectral_d_initial": args.spectral_d_initial if args.adapter_method == 'spectral' else 'N/A',
         "per_layer_opt": args.per_layer_opt,
         "gradient_checkpointing": args.gradient_checkpointing,
         "accuracy": median_metrics.get("accuracy", np.nan),
