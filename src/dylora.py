@@ -21,6 +21,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.pytorch_utils import Conv1D
 
 
 class DyLoRALinear(nn.Module):
@@ -36,8 +37,12 @@ class DyLoRALinear(nn.Module):
                  alpha: Optional[int] = None, dropout: float = 0.0):
         super().__init__()
         self.base_layer = base_layer
-        self.in_features = base_layer.in_features
-        self.out_features = base_layer.out_features
+        if isinstance(base_layer, Conv1D):
+            self.in_features = base_layer.nx
+            self.out_features = base_layer.nf
+        else:
+            self.in_features = base_layer.in_features
+            self.out_features = base_layer.out_features
         self.r = r
         self.alpha = alpha if alpha is not None else r
         self.scaling = self.alpha / self.r
@@ -104,12 +109,12 @@ class DyLoRAModel(nn.Module):
 
         # Unfreeze classifier head (needs training)
         for name, param in model.named_parameters():
-            if 'classifier' in name:
+            if 'classifier' in name or 'score' in name:
                 param.requires_grad = True
 
     def _apply_adapters(self, target_modules, r, alpha, dropout):
         for name, module in list(self.model.named_modules()):
-            if not isinstance(module, nn.Linear):
+            if not isinstance(module, (nn.Linear, Conv1D)):
                 continue
             if not any(target in name for target in target_modules):
                 continue

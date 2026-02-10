@@ -129,6 +129,7 @@ _METRIC_FOR_TASK = {
     "sst2": "accuracy",
     "stsb": "pearson",
     "wnli": "accuracy",
+    "cb": "f1",
 }
 
 ###############################################################################
@@ -174,6 +175,9 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
+    "boolq": ("question", "passage"),
+    "cb": ("premise", "hypothesis"),
+    "anli_r1": ("premise", "hypothesis"),
 }
 
 ###############################################################################
@@ -261,6 +265,10 @@ def parse_args():
     parser.add_argument("--spectral_dropout", type=float, default=0.0, help="Spectral adapter: dropout probability.")
     parser.add_argument("--spectral_d_initial", type=float, default=0.0, help="Spectral adapter: if > 0, initialize coefficients with N(0, d_initial) instead of zeros.")
     parser.add_argument("--spectral_target_modules", type=str, default=None, help="Spectral adapter: comma-separated list of target module names (e.g., 'query,value'). If None, uses architecture defaults.")
+
+    # Generic target-module override (applies to all adapter methods)
+    parser.add_argument("--adapter_target_modules", type=str, default=None,
+        help="Comma-separated target module names, overrides architecture defaults")
 
     # Execution & Benchmarking Arguments
     parser.add_argument("--name", type=str, default="glue_finetuning_run", help="A name for this training run.")
@@ -600,7 +608,19 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
         os.makedirs(args.output_dir, exist_ok=True)
 
     # --- Data Loading ---
-    raw_datasets = load_dataset("glue", args.task_name)
+    if args.task_name in ("boolq", "cb"):
+        raw_datasets = load_dataset("super_glue", args.task_name)
+    elif args.task_name == "anli_r1":
+        _anli = load_dataset("facebook/anli")
+        # Remap ANLI R1 splits to standard names
+        from datasets import DatasetDict
+        raw_datasets = DatasetDict({
+            "train": _anli["train_r1"],
+            "validation": _anli["dev_r1"],
+            "test": _anli["test_r1"],
+        })
+    else:
+        raw_datasets = load_dataset("glue", args.task_name)
     is_regression = args.task_name == "stsb"
     if not is_regression:
         label_list = raw_datasets["train"].features["label"].names
@@ -653,7 +673,9 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
             logger.info(f"Initializing model for Spectral Adapter (Truncated DCT) training...")
 
             # Determine target modules: CLI override or architecture defaults
-            if args.spectral_target_modules:
+            if args.adapter_target_modules:
+                target_modules = [m.strip() for m in args.adapter_target_modules.split(",")]
+            elif args.spectral_target_modules:
                 target_modules = [m.strip() for m in args.spectral_target_modules.split(",")]
             elif "roberta" in args.model_name_or_path.lower() or "bert" in args.model_name_or_path.lower():
                 target_modules = ["query", "key", "value", "dense"]
@@ -661,6 +683,8 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
                 target_modules = ["c_attn", "c_proj"]
             elif "llama" in args.model_name_or_path.lower():
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            elif "opt" in args.model_name_or_path.lower():
+                target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
             else:
                 target_modules = ["q_proj", "v_proj"]
             logger.info(f"Spectral adapter target modules: {target_modules}")
@@ -682,13 +706,17 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
             # Use our custom DyLoRA implementation
             logger.info(f"Initializing model for DyLoRA training (custom implementation)...")
 
-            # Determine target modules based on model architecture
-            if "roberta" in args.model_name_or_path.lower() or "bert" in args.model_name_or_path.lower():
+            # Determine target modules: CLI override or architecture defaults
+            if args.adapter_target_modules:
+                target_modules = [m.strip() for m in args.adapter_target_modules.split(",")]
+            elif "roberta" in args.model_name_or_path.lower() or "bert" in args.model_name_or_path.lower():
                 target_modules = ["query", "key", "value", "dense"]
             elif "gpt2" in args.model_name_or_path.lower() or "gpt-2" in args.model_name_or_path.lower():
                 target_modules = ["c_attn", "c_proj"]
             elif "llama" in args.model_name_or_path.lower():
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            elif "opt" in args.model_name_or_path.lower():
+                target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
             else:
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -714,6 +742,8 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
                 target_modules = ["c_attn", "c_proj"]
             elif "llama" in args.model_name_or_path.lower():
                 target_modules = ["q_proj", "v_proj"]
+            elif "opt" in args.model_name_or_path.lower():
+                target_modules = ["q_proj", "v_proj"]
             else:
                 target_modules = ["q_proj", "v_proj"]
 
@@ -733,8 +763,10 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
         elif args.adapter_method in peft_methods:
             logger.info(f"Initializing model for {args.adapter_method.upper()} training with PEFT library...")
 
-            # Determine target modules based on model architecture
-            if "roberta" in args.model_name_or_path.lower() or "bert" in args.model_name_or_path.lower():
+            # Determine target modules: CLI override or architecture defaults
+            if args.adapter_target_modules:
+                target_modules = [m.strip() for m in args.adapter_target_modules.split(",")]
+            elif "roberta" in args.model_name_or_path.lower() or "bert" in args.model_name_or_path.lower():
                 # For BERT/RoBERTa models used in GLUE
                 target_modules = ["query", "key", "value", "dense"]
             elif "gpt2" in args.model_name_or_path.lower() or "gpt-2" in args.model_name_or_path.lower():
@@ -743,6 +775,9 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
             elif "llama" in args.model_name_or_path.lower():
                 # For LLaMA models
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            elif "opt" in args.model_name_or_path.lower():
+                # For OPT models (separate Q/K/V/out_proj + FFN)
+                target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
             else:
                 # Default: try common attention projection names
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -810,7 +845,25 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
 
             adapter_config = None
             if args.adapter_method == 'lora':
-                adapter_config = LoRAConfig(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
+                if args.adapter_target_modules:
+                    modules = [m.strip() for m in args.adapter_target_modules.split(",")]
+                    attn_matrices = []
+                    for m in modules:
+                        if m in ("query", "q_proj"):
+                            attn_matrices.append("q")
+                        elif m in ("key", "k_proj"):
+                            attn_matrices.append("k")
+                        elif m in ("value", "v_proj"):
+                            attn_matrices.append("v")
+                    intermediate_lora = any(m in ("dense", "intermediate", "fc1") for m in modules)
+                    output_lora = any(m in ("dense", "output", "fc2") for m in modules)
+                    adapter_config = LoRAConfig(
+                        r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout,
+                        attn_matrices=attn_matrices or ["q", "v"],
+                        intermediate_lora=intermediate_lora, output_lora=output_lora,
+                    )
+                else:
+                    adapter_config = LoRAConfig(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
             elif args.adapter_method == 'ia3':
                 adapter_config = IA3Config()
             elif args.adapter_method == 'prefix':
@@ -938,7 +991,12 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
-    metric = evaluate.load("glue", args.task_name)
+    if args.task_name in ("boolq", "cb"):
+        metric = evaluate.load("super_glue", args.task_name)
+    elif args.task_name == "anli_r1":
+        metric = evaluate.load("accuracy")
+    else:
+        metric = evaluate.load("glue", args.task_name)
     progress_bar = tqdm(range(args.max_train_steps))
     completed_steps = 0
     

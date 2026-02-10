@@ -24,6 +24,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.pytorch_utils import Conv1D
 
 
 def _dct_basis(d: int, k: int, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -58,8 +59,12 @@ class SpectralAdapterLinear(nn.Module):
                  d_initial: float = 0.0):
         super().__init__()
         self.base_layer = base_layer
-        self.out_features = base_layer.out_features  # m
-        self.in_features = base_layer.in_features    # n
+        if isinstance(base_layer, Conv1D):
+            self.out_features = base_layer.nf
+            self.in_features = base_layer.nx
+        else:
+            self.out_features = base_layer.out_features
+            self.in_features = base_layer.in_features
         self.p = p
         self.q = q
         self.scaling = scaling
@@ -143,13 +148,13 @@ class SpectralAdapterModel(nn.Module):
 
         # Unfreeze classifier head (newly initialized, needs training)
         for name, param in model.named_parameters():
-            if 'classifier' in name:
+            if 'classifier' in name or 'score' in name:
                 param.requires_grad = True
 
     def _apply_adapters(self, target_modules, p, q, scaling, dropout, d_initial):
         """Replace target linear layers with SpectralAdapterLinear."""
         for name, module in list(self.model.named_modules()):
-            if not isinstance(module, nn.Linear):
+            if not isinstance(module, (nn.Linear, Conv1D)):
                 continue
             if not any(target in name for target in target_modules):
                 continue
@@ -164,8 +169,12 @@ class SpectralAdapterModel(nn.Module):
                 parent = self.model
 
             # Determine p, q for this layer (could be adaptive)
-            layer_p = min(p, module.out_features)
-            layer_q = min(q, module.in_features)
+            if isinstance(module, Conv1D):
+                out_f, in_f = module.nf, module.nx
+            else:
+                out_f, in_f = module.out_features, module.in_features
+            layer_p = min(p, out_f)
+            layer_q = min(q, in_f)
 
             # Replace with adapted version
             adapted = SpectralAdapterLinear(
