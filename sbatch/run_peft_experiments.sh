@@ -3,24 +3,23 @@
 # PEFT Comprehensive Benchmark Suite - SLURM Submission Script
 # ============================================================================
 #
-# Submits single-seed benchmarks for PEFT methods on GLUE tasks.
-# Each job runs train_glue.py which uses seed=42 and writes
+# Submits Mo5 (median-of-five, seeds 41-45) benchmarks for PEFT methods on GLUE tasks.
+# Each job runs train_glue.py which trains 5 seeds and writes the median
 # results to ./results/mo53_glue.csv with file locking for concurrent safety.
 #
-# PARAMETER BUDGET: ~20K trainable params (matching Spectral p=16 reference)
+# MODULE TARGETING: All methods target Q+V (query, value) = 24 modules on BERT-base.
+# Each method uses its natural minimum config — no parameter matching.
 #
-# Techniques and approximate param counts on BERT-base:
+# Techniques and approximate param counts on BERT-base (Q+V, 24 modules):
 #   - base:         Full fine-tuning (~110M)        Performance ceiling
-#   - lora:         LoRA r=1, Q-only (~20K)         Parameter-matched (12 modules)
-#   - dora:         DoRA r=1, Q-only (~29K)         Closest possible (magnitude vectors add +768/module)
-#   - adalora:      AdaLoRA r=1, Q-only (~20K)      Parameter-matched (12 modules); = LoRA at r=1
-#   - dylora:       DyLoRA r=1, Q-only (~20K)       Parameter-matched (12 modules); = LoRA at r=1
-#   - vera:         VeRA r=128 (~20K)               Parameter-matched (73 modules)
-#   - fourierft:    FourierFT n=256 (~20K)          Parameter-matched (73 modules)
-#   - spectral_p16: Spectral Adapter p=q=16 (~20K)  Ours — reference (73 modules)
+#   - lora:         LoRA r=1, Q+V (~38K)            Minimum rank (24 modules)
+#   - dora:         DoRA r=1, Q+V (~57K)            Minimum rank + magnitude vectors
+#   - adalora:      AdaLoRA r=1, Q+V (~38K)         Minimum rank; = LoRA at r=1
+#   - dylora:       DyLoRA r=1, Q+V (~38K)          Minimum rank; = LoRA at r=1
+#   - vera:         VeRA r=128, Q+V (~8K)           Natural config (24 modules)
+#   - fourierft:    FourierFT n=256, Q+V (~8K)      Param-matched with Spectral p=16
+#   - spectral_p16: Spectral Adapter p=q=16 (~8K)   Ours (24 modules)
 #
-# Key insight: Spectral/VeRA/FourierFT cover all 73 linear modules at ~20K params.
-# LoRA-family methods must drop to 12 modules (Q-only) to match the budget.
 # At r=1, DyLoRA and AdaLoRA are functionally identical to LoRA (no rank sampling,
 # no pruning when init_r=target_r).
 #
@@ -63,14 +62,13 @@ models=(
 )
 
 # Techniques to benchmark
-# All PEFT methods tuned to ~20K params where structurally possible.
-# LoRA/DoRA included at structural minimum (r=1) for completeness.
+# All PEFT methods target Q+V (24 modules) at minimum rank/config.
 techniques=(
-    "base"
-    "lora"
+    #"base"
+    #"lora"
     #"dora"
-    "adalora"
-    "dylora"
+    #"adalora"
+    #"dylora"
     #"vera"
     "fourierft"
     "spectral_p16"
@@ -101,16 +99,9 @@ tasks=(
 # HYPERPARAMETERS
 # ============================================================================
 #
-# Target budget: ~20K trainable params (Spectral p=16 = 20,226 params)
-#
-# BERT-base module counts for target_modules=["query","key","value","dense"]:
-#   49 modules at 768x768  (Q, K, V, attn.output.dense, pooler.dense)
-#   12 modules at 3072x768 (intermediate.dense)
-#   12 modules at 768x3072 (output.dense)
-#   = 73 modules total
-#   + classifier head: 768x2 + 2 = 1,538 always-trainable params
-#
-# AdapterHub LoRA default on BERT: query+value only = 24 modules (768x768)
+# All methods target Q+V = 24 modules of 768x768 on BERT-base.
+# Classifier head: 768x2 + 2 = 1,538 always-trainable params.
+# Each method uses its minimum rank/config — no parameter matching.
 #
 # ============================================================================
 
@@ -128,9 +119,8 @@ BASE_LR="2e-5"
 BASE_EPOCHS=3
 
 # --- LoRA (Hu et al., 2021) via AdapterHub ---
-#     r=1, Q-only (12 modules of 768x768).
-#     Params: 12 modules x 1536 x 1 = 18,432 + 1,538 classifier = 19,970
-#     Parameter-matched to ~20K budget.
+#     r=1, Q+V (24 modules of 768x768).
+#     Params: 24 x 1536 x 1 + 1,538 classifier = 38,402
 #     alpha/r ratio kept at 2 (matching standard alpha=16/r=8 convention)
 LORA_LR="2e-4"
 LORA_R=1
@@ -138,11 +128,10 @@ LORA_ALPHA=2
 LORA_DROPOUT=0.0
 
 # --- DoRA (Liu et al., 2024) via PEFT ---
-#     r=1, Q-only (12 modules of 768x768).
-#     LoRA part: 12 x 1536 x 1 = 18,432
-#     Magnitude vectors: 12 x 768 = 9,216
-#     Total: 18,432 + 9,216 + 1,538 = 29,186
-#     Closest possible (~29K); magnitude vectors add +768 per module
+#     r=1, Q+V (24 modules of 768x768).
+#     LoRA part: 24 x 1536 x 1 = 36,864
+#     Magnitude vectors: 24 x 768 = 18,432
+#     Total: 36,864 + 18,432 + 1,538 = 56,834
 DORA_LR="2e-4"
 DORA_R=1
 DORA_ALPHA=2
@@ -150,35 +139,36 @@ DORA_DROPOUT=0.05
 
 # --- VeRA (Kopiczko et al., 2024) via PEFT ---
 #     Shared frozen random projections; only per-module scaling vectors are trainable.
-#     Trainable: 73 modules x 2r (lambda_d + lambda_b) = 146r + 1,538 classifier
-#     r=128 -> 18,688 + 1,538 = ~20K params  (MATCHED)
+#     Trainable: 24 modules x 2r (lambda_d + lambda_b) = 48r + 1,538 classifier
+#     r=128 -> 6,144 + 1,538 = 7,682 params
 VERA_LR="2e-3"
 VERA_R=128
 VERA_D_INITIAL=0.1
 VERA_DROPOUT=0.0
 
 # --- FourierFT (Gao et al., ICML 2024) via PEFT ---
-#     n spectral coefficients per module.
-#     Trainable: 73 modules x n + 1,538 classifier
-#     n=256 -> 18,688 + 1,538 = 20,226 params  (EXACT MATCH)
-#     scaling=300 is the paper's default for GLUE sequence classification
-FOURIERFT_LR="2e-3"
+#     n spectral coefficients per module, Q+V (24 modules of 768x768).
+#     Trainable: 24 modules x n + 1,538 classifier
+#     n=256 -> 6,144 + 1,538 = 7,682 params (param-matched with Spectral p=16)
+#     scaling 100-150 for GLUE (PEFT docs); lr=5e-2 validated by sanity check
+FOURIERFT_LR="5e-2"
 FOURIERFT_N=256
-FOURIERFT_SCALING=300.0
+FOURIERFT_SCALING=150.0
 
 # --- Spectral Adapter p=16 (ours) ---
-#     Trainable: 73 modules x (16 x 16) + 1,538 classifier
-#     = 18,688 + 1,538 = 20,226 params  (REFERENCE)
-SPECTRAL_LR="2e-3"
+#     Q+V (24 modules of 768x768).
+#     Trainable: 24 modules x (16 x 16) + 1,538 classifier
+#     = 6,144 + 1,538 = 7,682 params
+SPECTRAL_LR="2e-2"
 SPECTRAL_SCALING=1.0
 SPECTRAL_DROPOUT=0.0
 SPECTRAL_D_INITIAL=0.01  # Nonzero init fixes CoLA underperformance (late adapter onset)
 
 # --- AdaLoRA (Zhang et al., 2023) via PEFT ---
 #     SVD-parameterized LoRA with adaptive rank allocation.
-#     r=1, Q-only (12 modules of 768x768).
-#     Params: 12 x (768 + 768 + 1) = 18,444 + 1,538 = 19,982
-#     Parameter-matched (~20K). NOTE: init_r=target_r=1 → no pruning → = LoRA.
+#     r=1, Q+V (24 modules of 768x768).
+#     Params: 24 x (768 + 768 + 1) + 1,538 = 38,426
+#     NOTE: init_r=target_r=1 → no pruning → = LoRA.
 ADALORA_LR="2e-3"
 ADALORA_INIT_R=1
 ADALORA_TARGET_R=1
@@ -186,16 +176,16 @@ ADALORA_ALPHA=2
 
 # --- DyLoRA (Valipour et al., EACL 2023) custom ---
 #     Trains across randomly sampled ranks. At r=1, = standard LoRA.
-#     r=1, Q-only (12 modules of 768x768).
-#     Params: 12 x (768 + 768) x 1 = 18,432 + 1,538 = 19,970
-#     Parameter-matched (~20K). NOTE: r=1 → no rank sampling → = LoRA.
+#     r=1, Q+V (24 modules of 768x768).
+#     Params: 24 x (768 + 768) x 1 + 1,538 = 38,402
+#     NOTE: r=1 → no rank sampling → = LoRA.
 DYLORA_LR="2e-4"
 DYLORA_R=1
 DYLORA_ALPHA=2
 
-# --- Parameter-matched target module override for LoRA-family on BERT ---
-#     At r=1, targeting only query modules (12 modules) gives ~20K params.
-BERT_TARGET_MODULES_MATCHED="query"
+# --- Q+V target modules for all PEFT methods on BERT ---
+#     24 modules of 768x768 (12 layers x {query, value})
+BERT_TARGET_MODULES="query,value"
 
 # --- Higher-budget variant hyperparameters (for extended comparison) ---
 LORA_R8_LR="2e-4"
@@ -281,35 +271,34 @@ get_epochs() {
 
 get_time_limit() {
     # Returns SLURM time string based on technique, task, and model
-    # Estimates derived from actual BERT-base timings (single seed, ~1/5 of Mo5):
-    # Time limits include ~2x safety margin.
+    # Mo5 (5 seeds): 5x single-seed estimates with ~2x safety margin each.
     local technique=$1
     local task=$2
     local model=$3
     local minutes=0
 
     if [[ "$technique" == "base" ]]; then
-        # Full FT: 3 epochs, single seed
+        # Full FT: 3 epochs, 5 seeds
         case $task in
-            mrpc|rte|stsb|wnli|cb) minutes=10   ;;
-            cola)                   minutes=15   ;;
-            boolq)                  minutes=20   ;;   # 9.4K train, 3ep
-            sst2)                   minutes=30   ;;
-            anli_r1)                minutes=40   ;;   # 16.9K train, 3ep
-            qnli)                   minutes=55   ;;
-            qqp|mnli)               minutes=120  ;;
+            mrpc|rte|stsb|wnli|cb) minutes=50   ;;
+            cola)                   minutes=75   ;;
+            boolq)                  minutes=100  ;;   # 9.4K train, 3ep
+            sst2)                   minutes=150  ;;
+            anli_r1)                minutes=200  ;;   # 16.9K train, 3ep
+            qnli)                   minutes=275  ;;
+            qqp|mnli)               minutes=600  ;;
         esac
     else
-        # PEFT: frozen backbone, more epochs, single seed
+        # PEFT: frozen backbone, more epochs, 5 seeds
         case $task in
-            rte|wnli|cb) minutes=30   ;;   # 30min  (tiny dataset, 30ep)
-            mrpc|stsb)   minutes=35   ;;   # 35min  (small dataset, 30ep)
-            cola)        minutes=55   ;;   # 55min  (medium dataset, 30ep)
-            boolq)       minutes=120  ;;   # 2h     (medium dataset, 9.4K, 30ep)
-            anli_r1)     minutes=180  ;;   # 3h     (medium-large dataset, 16.9K, 30ep)
-            sst2)        minutes=240  ;;   # 4h     (large dataset, 10ep)
-            qnli)        minutes=360  ;;   # 6h     (xlarge dataset, 10ep)
-            qqp|mnli)    minutes=600  ;;   # 10h    (xxlarge dataset, 10ep)
+            rte|wnli|cb) minutes=150  ;;   # 2h30   (tiny dataset, 30ep)
+            mrpc|stsb)   minutes=175  ;;   # 2h55   (small dataset, 30ep)
+            cola)        minutes=275  ;;   # 4h35   (medium dataset, 30ep)
+            boolq)       minutes=600  ;;   # 10h    (medium dataset, 9.4K, 30ep)
+            anli_r1)     minutes=900  ;;   # 15h    (medium-large dataset, 16.9K, 30ep)
+            sst2)        minutes=1200 ;;   # 20h    (large dataset, 10ep)
+            qnli)        minutes=1800 ;;   # 30h    (xlarge dataset, 10ep)
+            qqp|mnli)    minutes=3000 ;;   # 50h    (xxlarge dataset, 10ep)
         esac
     fi
 
@@ -357,39 +346,51 @@ build_python_cmd() {
         lora)
             local cmd="$common --optimizer adamw-lora --learning_rate $LORA_LR --lora_r $LORA_R --lora_alpha $LORA_ALPHA --lora_dropout $LORA_DROPOUT"
             if [[ "$model" == *"bert"* ]]; then
-                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES_MATCHED"
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
             fi
             echo "$cmd"
             ;;
         dora)
             local cmd="$common --optimizer adamw-dora --learning_rate $DORA_LR --dora_r $DORA_R --dora_alpha $DORA_ALPHA --dora_dropout $DORA_DROPOUT"
             if [[ "$model" == *"bert"* ]]; then
-                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES_MATCHED"
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
             fi
             echo "$cmd"
             ;;
         vera)
-            echo "$common --optimizer adamw-vera --learning_rate $VERA_LR --vera_r $VERA_R --vera_d_initial $VERA_D_INITIAL --vera_dropout $VERA_DROPOUT"
+            local cmd="$common --optimizer adamw-vera --learning_rate $VERA_LR --vera_r $VERA_R --vera_d_initial $VERA_D_INITIAL --vera_dropout $VERA_DROPOUT"
+            if [[ "$model" == *"bert"* ]]; then
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
+            fi
+            echo "$cmd"
             ;;
         fourierft)
-            echo "$common --optimizer adamw-fourierft --learning_rate $FOURIERFT_LR --fourierft_n_frequency $FOURIERFT_N --fourierft_scaling $FOURIERFT_SCALING"
+            local cmd="$common --optimizer adamw-fourierft --learning_rate $FOURIERFT_LR --fourierft_n_frequency $FOURIERFT_N --fourierft_scaling $FOURIERFT_SCALING"
+            if [[ "$model" == *"bert"* ]]; then
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
+            fi
+            echo "$cmd"
             ;;
         adalora)
             local cmd="$common --optimizer adamw-adalora --learning_rate $ADALORA_LR --adalora_init_r $ADALORA_INIT_R --adalora_target_r $ADALORA_TARGET_R --adalora_alpha $ADALORA_ALPHA"
             if [[ "$model" == *"bert"* ]]; then
-                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES_MATCHED"
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
             fi
             echo "$cmd"
             ;;
         dylora)
             local cmd="$common --optimizer adamw-dylora --learning_rate $DYLORA_LR --dylora_r $DYLORA_R --dylora_alpha $DYLORA_ALPHA"
             if [[ "$model" == *"bert"* ]]; then
-                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES_MATCHED"
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
             fi
             echo "$cmd"
             ;;
         spectral_p16)
-            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_p 16 --spectral_q 16 --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL"
+            local cmd="$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_p 16 --spectral_q 16 --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL"
+            if [[ "$model" == *"bert"* ]]; then
+                cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
+            fi
+            echo "$cmd"
             ;;
         # --- Higher-budget variants ---
         lora_r8)
@@ -414,13 +415,13 @@ get_technique_desc() {
     # Returns a short description for logging
     case $1 in
         base)           echo "Full FT (lr=$BASE_LR, ${BASE_EPOCHS}ep, ~110M params)" ;;
-        lora)           echo "LoRA (r=$LORA_R, a=$LORA_ALPHA, Q-only, lr=$LORA_LR, ~20K params)" ;;
-        dora)           echo "DoRA (r=$DORA_R, a=$DORA_ALPHA, Q-only, lr=$DORA_LR, ~29K params)" ;;
-        adalora)        echo "AdaLoRA (init_r=$ADALORA_INIT_R, target_r=$ADALORA_TARGET_R, Q-only, lr=$ADALORA_LR, ~20K params)" ;;
-        dylora)         echo "DyLoRA (r=$DYLORA_R, a=$DYLORA_ALPHA, Q-only, lr=$DYLORA_LR, ~20K params)" ;;
-        vera)           echo "VeRA (r=$VERA_R, lr=$VERA_LR, ~20K params)" ;;
-        fourierft)      echo "FourierFT (n=$FOURIERFT_N, s=$FOURIERFT_SCALING, lr=$FOURIERFT_LR, ~20K params)" ;;
-        spectral_p16)   echo "Spectral (p=16, q=16, lr=$SPECTRAL_LR, ~20K params)" ;;
+        lora)           echo "LoRA (r=$LORA_R, a=$LORA_ALPHA, Q+V, lr=$LORA_LR, ~38K params)" ;;
+        dora)           echo "DoRA (r=$DORA_R, a=$DORA_ALPHA, Q+V, lr=$DORA_LR, ~57K params)" ;;
+        adalora)        echo "AdaLoRA (init_r=$ADALORA_INIT_R, target_r=$ADALORA_TARGET_R, Q+V, lr=$ADALORA_LR, ~38K params)" ;;
+        dylora)         echo "DyLoRA (r=$DYLORA_R, a=$DYLORA_ALPHA, Q+V, lr=$DYLORA_LR, ~38K params)" ;;
+        vera)           echo "VeRA (r=$VERA_R, Q+V, lr=$VERA_LR, ~8K params)" ;;
+        fourierft)      echo "FourierFT (n=$FOURIERFT_N, s=$FOURIERFT_SCALING, Q+V, lr=$FOURIERFT_LR, ~8K params)" ;;
+        spectral_p16)   echo "Spectral (p=16, q=16, Q+V, lr=$SPECTRAL_LR, ~8K params)" ;;
         lora_r8)        echo "LoRA (r=$LORA_R8_R, a=$LORA_R8_ALPHA, lr=$LORA_R8_LR, ~295K params)" ;;
         dora_r16)       echo "DoRA (r=$DORA_R16_R, a=$DORA_R16_ALPHA, lr=$DORA_R16_LR, ~600K params)" ;;
         vera_r256)      echo "VeRA (r=$VERA_R256_R, lr=$VERA_R256_LR, ~48K params)" ;;
@@ -440,7 +441,7 @@ echo "Models:     ${models[*]}"
 echo "Techniques: ${techniques[*]}"
 echo "Tasks:      ${tasks[*]}"
 echo "Dtype:      $DTYPE"
-echo "Target:     ~20K params (Spectral p=16)"
+echo "Target:     Q+V (24 modules), min config per method"
 echo "============================================"
 echo ""
 

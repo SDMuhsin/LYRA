@@ -114,7 +114,7 @@ os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
 ###############################################################################
 #                                   constants                                 #
 ###############################################################################
-SEEDS: List[int] = [42]
+SEEDS: List[int] = [41, 42, 43, 44, 45]
 RESULTS_DIR = "./results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 RESULTS_FILE = os.path.join(RESULTS_DIR, "mo53_glue.csv")
@@ -233,7 +233,7 @@ def parse_args():
     parser.add_argument("--vera_d_initial", type=float, default=0.1, help="VeRA initial value for scaling vectors.")
     parser.add_argument("--vera_projection_prng_key", type=int, default=0, help="VeRA random seed for projection initialization.")
     parser.add_argument("--fourierft_n_frequency", type=int, default=1000, help="FourierFT number of learnable frequency components.")
-    parser.add_argument("--fourierft_scaling", type=float, default=300.0, help="FourierFT scaling parameter (300.0 for sequence classification).")
+    parser.add_argument("--fourierft_scaling", type=float, default=150.0, help="FourierFT scaling parameter (100-150 for GLUE/NLU, 300 for LLaMA/ViT).")
     parser.add_argument("--fourierft_random_loc_seed", type=int, default=777, help="FourierFT random seed for frequency selection.")
 
     # GB-VeRA Specific Arguments
