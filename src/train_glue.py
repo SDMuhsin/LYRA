@@ -265,6 +265,10 @@ def parse_args():
     parser.add_argument("--spectral_dropout", type=float, default=0.0, help="Spectral adapter: dropout probability.")
     parser.add_argument("--spectral_d_initial", type=float, default=0.0, help="Spectral adapter: if > 0, initialize coefficients with N(0, d_initial) instead of zeros.")
     parser.add_argument("--spectral_target_modules", type=str, default=None, help="Spectral adapter: comma-separated list of target module names (e.g., 'query,value'). If None, uses architecture defaults.")
+    parser.add_argument("--spectral_freq_mode", type=str, default="contiguous", choices=["contiguous", "geometric", "geometric_half", "hybrid"], help="Spectral adapter: frequency selection strategy. 'contiguous' uses [0..k-1], 'geometric' uses power-spaced indices over [0, d//2], 'hybrid' uses 3k/4 contiguous low + k/4 geometric high.")
+    parser.add_argument("--spectral_freq_exponent", type=float, default=2.0, help="Spectral adapter: exponent for geometric spacing (default 2.0=quadratic). 1.0=linear/uniform, 3.0=cubic/denser low-freq.")
+    parser.add_argument("--spectral_factored_rank", type=int, default=0, help="Spectral adapter: if > 0, factor S = A(p,r)@B(r,q) for wider freq coverage. Params per module = p*r + r*q. 0 = dense S (default).")
+    parser.add_argument("--spectral_learn_scaling", action="store_true", default=False, help="Spectral adapter: if set, each module gets a learnable log-space scaling parameter (+1 param/module).")
 
     # Generic target-module override (applies to all adapter methods)
     parser.add_argument("--adapter_target_modules", type=str, default=None,
@@ -697,6 +701,10 @@ def run_single_seed(base_args: argparse.Namespace, seed: int):
                 scaling=args.spectral_scaling,
                 dropout=args.spectral_dropout,
                 d_initial=args.spectral_d_initial,
+                freq_mode=args.spectral_freq_mode,
+                freq_exponent=args.spectral_freq_exponent,
+                factored_rank=args.spectral_factored_rank,
+                learn_scaling=args.spectral_learn_scaling,
             )
 
             logger.info(f"Successfully applied Spectral Adapter to model.")
@@ -1150,7 +1158,7 @@ def main():
         "fourierft_n_frequency", "fourierft_scaling",
         "adalora_init_r", "adalora_target_r", "adalora_alpha", "adalora_dropout",
         "dylora_r", "dylora_alpha", "dylora_dropout",
-        "spectral_p", "spectral_q", "spectral_scaling", "spectral_dropout", "spectral_d_initial",
+        "spectral_p", "spectral_q", "spectral_scaling", "spectral_dropout", "spectral_d_initial", "spectral_freq_mode", "spectral_freq_exponent", "spectral_factored_rank", "spectral_learn_scaling",
         "per_layer_opt", "gradient_checkpointing", "accuracy", "f1", "matthews_correlation", "pearson", "spearmanr",
         "total_training_time_sec", "param_mem_mib", "opt_mem_mib", "runtime_mem_mib",
         "peak_mem_mib", "theoretical_mem_mib", "avg_step_time", "std_step_time", "seed"
@@ -1203,6 +1211,10 @@ def main():
         "spectral_scaling": args.spectral_scaling if args.adapter_method == 'spectral' else 'N/A',
         "spectral_dropout": args.spectral_dropout if args.adapter_method == 'spectral' else 'N/A',
         "spectral_d_initial": args.spectral_d_initial if args.adapter_method == 'spectral' else 'N/A',
+        "spectral_freq_mode": args.spectral_freq_mode if args.adapter_method == 'spectral' else 'N/A',
+        "spectral_freq_exponent": args.spectral_freq_exponent if args.adapter_method == 'spectral' else 'N/A',
+        "spectral_factored_rank": args.spectral_factored_rank if args.adapter_method == 'spectral' else 'N/A',
+        "spectral_learn_scaling": args.spectral_learn_scaling if args.adapter_method == 'spectral' else 'N/A',
         "per_layer_opt": args.per_layer_opt,
         "gradient_checkpointing": args.gradient_checkpointing,
         "accuracy": median_metrics.get("accuracy", np.nan),

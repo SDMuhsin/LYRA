@@ -3,3 +3,4 @@ llmdocs
 data/
 results
 **/**.pyc
+logs

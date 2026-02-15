@@ -18,7 +18,7 @@
 #   - dylora:       DyLoRA r=1, Q+V (~38K)          Minimum rank; = LoRA at r=1
 #   - vera:         VeRA r=128, Q+V (~8K)           Natural config (24 modules)
 #   - fourierft:    FourierFT n=256, Q+V (~8K)      Param-matched with Spectral p=16
-#   - spectral_p16: Spectral Adapter p=q=16 (~8K)   Ours (24 modules)
+#   - spectral_p16: Spectral Adapter p=q=32,r=4 (~8K) Ours (factored+learn_scale)
 #
 # At r=1, DyLoRA and AdaLoRA are functionally identical to LoRA (no rank sampling,
 # no pruning when init_r=target_r).
@@ -70,7 +70,7 @@ techniques=(
     #"adalora"
     #"dylora"
     #"vera"
-    "fourierft"
+    #"fourierft"
     "spectral_p16"
     # --- Higher-budget variants (uncomment for extended comparison) ---
     # "lora_r8"        # LoRA r=8 standard config (~295K params)
@@ -155,14 +155,19 @@ FOURIERFT_LR="5e-2"
 FOURIERFT_N=256
 FOURIERFT_SCALING=150.0
 
-# --- Spectral Adapter p=16 (ours) ---
+# --- Spectral Adapter (ours) ---
 #     Q+V (24 modules of 768x768).
-#     Trainable: 24 modules x (16 x 16) + 1,538 classifier
-#     = 6,144 + 1,538 = 7,682 params
+#     Factored S: p=q=32, rank=4 → 32*4 + 4*32 = 256 params/module
+#     + per-module learnable scaling (+1 param/module)
+#     Trainable: 24 modules x 257 + 1,538 classifier = 7,706 params
 SPECTRAL_LR="2e-2"
+SPECTRAL_P=32
+SPECTRAL_Q=32
 SPECTRAL_SCALING=1.0
 SPECTRAL_DROPOUT=0.0
 SPECTRAL_D_INITIAL=0.01  # Nonzero init fixes CoLA underperformance (late adapter onset)
+SPECTRAL_FACTORED_RANK=4
+SPECTRAL_LEARN_SCALING=true  # Per-module learnable scaling (+24 params total)
 
 # --- AdaLoRA (Zhang et al., 2023) via PEFT ---
 #     SVD-parameterized LoRA with adaptive rank allocation.
@@ -386,7 +391,10 @@ build_python_cmd() {
             echo "$cmd"
             ;;
         spectral_p16)
-            local cmd="$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_p 16 --spectral_q 16 --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL"
+            local cmd="$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_p $SPECTRAL_P --spectral_q $SPECTRAL_Q --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL --spectral_factored_rank $SPECTRAL_FACTORED_RANK"
+            if [[ "$SPECTRAL_LEARN_SCALING" == "true" ]]; then
+                cmd+=" --spectral_learn_scaling"
+            fi
             if [[ "$model" == *"bert"* ]]; then
                 cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
             fi
@@ -406,7 +414,7 @@ build_python_cmd() {
             echo "$common --optimizer adamw-fourierft --learning_rate $FOURIERFT_N1K_LR --fourierft_n_frequency $FOURIERFT_N1K_N --fourierft_scaling $FOURIERFT_N1K_SCALING"
             ;;
         spectral_p32)
-            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_P32_LR --spectral_p 32 --spectral_q 32 --spectral_scaling $SPECTRAL_P32_SCALING --spectral_dropout $SPECTRAL_P32_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL"
+            echo "$common --optimizer adamw-spectral --learning_rate $SPECTRAL_P32_LR --spectral_p 32 --spectral_q 32 --spectral_scaling $SPECTRAL_P32_SCALING --spectral_dropout $SPECTRAL_P32_DROPOUT --spectral_d_initial $SPECTRAL_D_INITIAL --spectral_learn_scaling"
             ;;
     esac
 }
@@ -421,7 +429,7 @@ get_technique_desc() {
         dylora)         echo "DyLoRA (r=$DYLORA_R, a=$DYLORA_ALPHA, Q+V, lr=$DYLORA_LR, ~38K params)" ;;
         vera)           echo "VeRA (r=$VERA_R, Q+V, lr=$VERA_LR, ~8K params)" ;;
         fourierft)      echo "FourierFT (n=$FOURIERFT_N, s=$FOURIERFT_SCALING, Q+V, lr=$FOURIERFT_LR, ~8K params)" ;;
-        spectral_p16)   echo "Spectral (p=16, q=16, Q+V, lr=$SPECTRAL_LR, ~8K params)" ;;
+        spectral_p16)   echo "Spectral (p=$SPECTRAL_P, q=$SPECTRAL_Q, r=$SPECTRAL_FACTORED_RANK, learn_scale, Q+V, lr=$SPECTRAL_LR, ~8K params)" ;;
         lora_r8)        echo "LoRA (r=$LORA_R8_R, a=$LORA_R8_ALPHA, lr=$LORA_R8_LR, ~295K params)" ;;
         dora_r16)       echo "DoRA (r=$DORA_R16_R, a=$DORA_R16_ALPHA, lr=$DORA_R16_LR, ~600K params)" ;;
         vera_r256)      echo "VeRA (r=$VERA_R256_R, lr=$VERA_R256_LR, ~48K params)" ;;
