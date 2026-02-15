@@ -64,13 +64,13 @@ models=(
 # Techniques to benchmark
 # All PEFT methods target Q+V (24 modules) at minimum rank/config.
 techniques=(
-    #"base"
-    #"lora"
-    #"dora"
-    #"adalora"
-    #"dylora"
-    #"vera"
-    #"fourierft"
+    "base"
+    "lora"
+    "dora"
+    "adalora"
+    "dylora"
+    "vera"
+    "fourierft"
     "spectral_p16"
     # --- Higher-budget variants (uncomment for extended comparison) ---
     # "lora_r8"        # LoRA r=8 standard config (~295K params)
@@ -92,7 +92,7 @@ tasks=(
     #"qqp"      # 364K train - very expensive, uncomment if needed
     "boolq"    # 9.4K train (SuperGLUE)
     "cb"       # 250 train (SuperGLUE)
-    "anli_r1"  # 16.9K train (Adversarial NLI Round 1)
+    #"anli_r1"  # 16.9K train (Adversarial NLI Round 1)
 )
 
 # ============================================================================
