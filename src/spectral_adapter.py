@@ -199,8 +199,12 @@ class SpectralAdapterLinear(nn.Module):
             self.coeffs_A = nn.Parameter(torch.zeros(p, factored_rank, dtype=dtype))
             self.coeffs_B = nn.Parameter(torch.zeros(factored_rank, q, dtype=dtype))
             if d_initial > 0.0:
-                nn.init.normal_(self.coeffs_A, mean=0, std=d_initial)
-                nn.init.normal_(self.coeffs_B, mean=0, std=d_initial)
+                # Scale factor init so S = A@B has Std[S] = d_initial.
+                # Var[S_ij] = r * sigma_a^2 * sigma_b^2. With sigma_a = sigma_b = sigma:
+                # Std[S] = sqrt(r) * sigma^2 => sigma = sqrt(d_initial / sqrt(r))
+                sigma = math.sqrt(d_initial / math.sqrt(factored_rank))
+                nn.init.normal_(self.coeffs_A, mean=0, std=sigma)
+                nn.init.normal_(self.coeffs_B, mean=0, std=sigma)
         else:
             # Dense: S ∈ R^{p × q}
             self.coeffs = nn.Parameter(torch.zeros(p, q, dtype=dtype))
