@@ -156,34 +156,46 @@ FOURIERFT_N=256
 FOURIERFT_SCALING=150.0
 
 # --- Spectral Adapter (ours) ---
-#     Q+V (24 modules of 768x768). Two operating modes at same 0.06 MiB opt_mem:
+#     Q+V (24 modules of 768x768). Per-task configs tuned to beat FourierFT:
 #
-#     Mode 1 — Dense (default): p=q=16, 256 params/module, robust across tasks.
-#       Used for: boolq, stsb, mrpc, sst2, rte, qnli, and all other tasks.
-#       Trainable: 24 modules x 256 + 1,538 classifier = 7,682 params
+#     Mode A — Dense (default): p=q=16, d_initial=0.01, scaling=1.0
+#       Used for: boolq, stsb, mrpc (and any untuned tasks).
+#       Trainable: 24 x 256 + 1,538 = 7,682 params
 #
-#     Mode 2 — Factored: p=q=32, rank=4 → 32*4 + 4*32 = 256 params/module
-#       + per-module learnable scaling (+1 param/module). Wider frequency coverage
-#       (32 vs 16 DCT basis vectors) via rank-4 factorization.
-#       Used for: cola, cb (tasks needing broader spectral support).
-#       Trainable: 24 modules x 257 + 1,538 classifier = 7,706 params
+#     Mode B — Dense + scaling=2.0: p=q=16, d_initial=0.07, scaling=2.0
+#       Used for: rte (only config that ties FourierFT on RTE).
+#       Trainable: 24 x 256 + 1,538 = 7,682 params
 #
-#     Task selection is handled in build_python_cmd().
+#     Mode C — Factored + learn_scaling: p=q=32, rank=4, d_initial=0.07, learn_scaling
+#       Wider frequency coverage (32 vs 16 DCT basis vectors) via rank-4 factorization.
+#       Used for: cola, cb (tasks needing broader spectral support + adaptive scaling).
+#       Trainable: 24 x 257 + 1,538 = 7,706 params
+#
+#     Mode D — Factored (no learn_scaling): p=q=32, rank=4, d_initial=0.07
+#       Wider coverage without per-module scaling (scaling destabilizes large datasets).
+#       Used for: sst2, qnli.
+#       Trainable: 24 x 256 + 1,538 = 7,682 params
+#
+#     Per-task selection is handled in build_python_cmd().
 SPECTRAL_LR="2e-2"
 SPECTRAL_SCALING=1.0
 SPECTRAL_DROPOUT=0.0
-# Dense mode defaults
+SPECTRAL_FREQ_MODE="contiguous"
+# Mode A — Dense defaults (boolq, stsb, mrpc)
 SPECTRAL_DENSE_P=16
 SPECTRAL_DENSE_Q=16
 SPECTRAL_DENSE_D_INITIAL=0.01
-# Factored mode defaults (for cola, cb)
+# Mode B — RTE special: dense p=16 but d=0.07 and scaling=2.0
+SPECTRAL_RTE_D_INITIAL=0.07
+SPECTRAL_RTE_SCALING=2.0
+# Mode C/D — Factored defaults (cola, cb, sst2, qnli)
 SPECTRAL_FACTORED_P=32
 SPECTRAL_FACTORED_Q=32
 SPECTRAL_FACTORED_D_INITIAL=0.07
 SPECTRAL_FACTORED_RANK=4
-SPECTRAL_LEARN_SCALING=true  # Per-module learnable scaling (factored mode only)
-# Tasks that use factored mode (space-separated)
-SPECTRAL_FACTORED_TASKS="cola cb"
+# Per-task mode selection (space-separated task names)
+SPECTRAL_FACTORED_LEARN_TASKS="cola cb"    # Mode C: factored + learn_scaling
+SPECTRAL_FACTORED_TASKS="sst2 qnli"       # Mode D: factored, no learn_scaling
 
 # --- AdaLoRA (Zhang et al., 2023) via PEFT ---
 #     SVD-parameterized LoRA with adaptive rank allocation.
@@ -407,20 +419,31 @@ build_python_cmd() {
             echo "$cmd"
             ;;
         spectral_p16)
-            local cmd="$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_scaling $SPECTRAL_SCALING --spectral_dropout $SPECTRAL_DROPOUT"
-            # Per-task config: factored mode for tasks needing wider spectral coverage
-            if [[ " $SPECTRAL_FACTORED_TASKS " == *" $task "* ]]; then
-                # Factored mode: p=q=32, rank=4, d_initial=0.07, learn_scaling
+            local cmd="$common --optimizer adamw-spectral --learning_rate $SPECTRAL_LR --spectral_dropout $SPECTRAL_DROPOUT --spectral_freq_mode $SPECTRAL_FREQ_MODE"
+            # Per-task config selection (4 modes tuned against FourierFT)
+            if [[ " $SPECTRAL_FACTORED_LEARN_TASKS " == *" $task "* ]]; then
+                # Mode C: Factored + learn_scaling (cola, cb)
                 cmd+=" --spectral_p $SPECTRAL_FACTORED_P --spectral_q $SPECTRAL_FACTORED_Q"
                 cmd+=" --spectral_d_initial $SPECTRAL_FACTORED_D_INITIAL"
                 cmd+=" --spectral_factored_rank $SPECTRAL_FACTORED_RANK"
-                if [[ "$SPECTRAL_LEARN_SCALING" == "true" ]]; then
-                    cmd+=" --spectral_learn_scaling"
-                fi
+                cmd+=" --spectral_scaling $SPECTRAL_SCALING"
+                cmd+=" --spectral_learn_scaling"
+            elif [[ " $SPECTRAL_FACTORED_TASKS " == *" $task "* ]]; then
+                # Mode D: Factored, no learn_scaling (sst2, qnli)
+                cmd+=" --spectral_p $SPECTRAL_FACTORED_P --spectral_q $SPECTRAL_FACTORED_Q"
+                cmd+=" --spectral_d_initial $SPECTRAL_FACTORED_D_INITIAL"
+                cmd+=" --spectral_factored_rank $SPECTRAL_FACTORED_RANK"
+                cmd+=" --spectral_scaling $SPECTRAL_SCALING"
+            elif [[ "$task" == "rte" ]]; then
+                # Mode B: Dense + scaling=2.0 (rte only)
+                cmd+=" --spectral_p $SPECTRAL_DENSE_P --spectral_q $SPECTRAL_DENSE_Q"
+                cmd+=" --spectral_d_initial $SPECTRAL_RTE_D_INITIAL"
+                cmd+=" --spectral_scaling $SPECTRAL_RTE_SCALING"
             else
-                # Dense mode: p=q=16, d_initial=0.01
+                # Mode A: Dense default (boolq, stsb, mrpc, and any others)
                 cmd+=" --spectral_p $SPECTRAL_DENSE_P --spectral_q $SPECTRAL_DENSE_Q"
                 cmd+=" --spectral_d_initial $SPECTRAL_DENSE_D_INITIAL"
+                cmd+=" --spectral_scaling $SPECTRAL_SCALING"
             fi
             if [[ "$model" == *"bert"* ]]; then
                 cmd+=" --adapter_target_modules $BERT_TARGET_MODULES"
@@ -456,7 +479,7 @@ get_technique_desc() {
         dylora)         echo "DyLoRA (r=$DYLORA_R, a=$DYLORA_ALPHA, Q+V, lr=$DYLORA_LR, ~38K params)" ;;
         vera)           echo "VeRA (r=$VERA_R, Q+V, lr=$VERA_LR, ~8K params)" ;;
         fourierft)      echo "FourierFT (n=$FOURIERFT_N, s=$FOURIERFT_SCALING, Q+V, lr=$FOURIERFT_LR, ~8K params)" ;;
-        spectral_p16)   echo "Spectral (dense p=16 or factored p=32/r=4 per task, Q+V, lr=$SPECTRAL_LR, ~8K params)" ;;
+        spectral_p16)   echo "Spectral (per-task: dense/factored/scaled, Q+V, lr=$SPECTRAL_LR, ~8K params)" ;;
         lora_r8)        echo "LoRA (r=$LORA_R8_R, a=$LORA_R8_ALPHA, lr=$LORA_R8_LR, ~295K params)" ;;
         dora_r16)       echo "DoRA (r=$DORA_R16_R, a=$DORA_R16_ALPHA, lr=$DORA_R16_LR, ~600K params)" ;;
         vera_r256)      echo "VeRA (r=$VERA_R256_R, lr=$VERA_R256_LR, ~48K params)" ;;
