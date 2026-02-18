@@ -82,16 +82,16 @@ techniques=(
 
 # GLUE tasks to evaluate
 tasks=(
-    "mrpc"
-    "sst2"
-    "cola"
-    "rte"
+    #"mrpc"
+    #"sst2"
+    #"cola"
+    #"rte"
     "qnli"
-    "stsb"
+    #"stsb"
     #"mnli"     # 393K train - very expensive, uncomment if needed
     #"qqp"      # 364K train - very expensive, uncomment if needed
-    "boolq"    # 9.4K train (SuperGLUE)
-    "cb"       # 250 train (SuperGLUE)
+    #"boolq"    # 9.4K train (SuperGLUE)
+    #"cb"       # 250 train (SuperGLUE)
     #"anli_r1"  # 16.9K train (Adversarial NLI Round 1)
 )
 
